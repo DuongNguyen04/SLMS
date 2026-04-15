@@ -1,0 +1,118 @@
+WEEKLY REPORT - WEEK 1
+Week: April 8 - 15, 2026
+Implementer: DuongNQ31
+Project: Logistics & E-Commerce Management System (SLMS)
+
+
+WEEKLY OBJECTIVE
+
+This week focuses on building the foundation for the entire system, including
+project initialization, database design, JWT authentication configuration, and
+implementation of authentication + internal user management.
+
+
+COMPLETED WORK
+
+1. Project Initialization and Platform Configuration
+   - Created Spring Boot 4.x with Maven, connected to PostgreSQL
+   - Package structure following standards: controller, service, service/impl, repository,
+     entity, dto, config, exception, mapper
+   - Configured application-local.properties for dev environment
+   - Designed 7 core entities: UserAccount, Product, Cart, CartItem, CustomerOrder,
+     OrderItem, Shipment
+
+2. Database and JPA Entities
+   - Designed schema with 7 tables featuring complete relationships, FK constraints,
+     unique constraints, and CHECK constraints
+   - Created enums: Role (CUSTOMER, STAFF, ADMIN), OrderStatus (PENDING, CONFIRMED,
+     SHIPPED, DELIVERED, CANCELLED), ShipmentStatus (CREATED, IN_TRANSIT, DELIVERED)
+   - Configured Flyway migration (V1__init_schema.sql)
+   - Complete JPA entity mapping with BigDecimal for prices, LocalDateTime for timestamps
+
+3. Internal Authentication (Module A - Authentication & Authorization)
+   - User registration: validate required fields, enforce unique username, BCrypt encryption
+   - User login: credential authentication, JWT access token (15 min) and refresh token (7 days)
+   - Configured Spring Security filter chain with custom JWT filter
+   - Role-based authorization: CUSTOMER, STAFF, ADMIN
+   - Endpoints:
+     * POST /auth/register - public registration
+     * POST /auth/login - user login
+     * POST /auth/refresh - token refresh
+   - Mapper: UserAccountMapper for DTO conversion
+
+4. Internal User Management (Module B - User Admin)
+   - Complete CRUD for UserAccount (create, update, delete, read, list)
+   - Access control: only ADMIN has permission to access UserAdminController
+   - User role assignment (CUSTOMER, STAFF, ADMIN)
+   - User list pagination and filtering
+   - Result caching in Redis for performance improvement
+   - Endpoints:
+     * GET /admin/users - list all users (with pagination)
+     * GET /admin/users/{id} - view user details
+     * POST /admin/users - create new user
+     * PUT /admin/users/{id} - update user information
+     * DELETE /admin/users/{id} - delete user
+     * PUT /admin/users/{id}/role - assign role to user
+
+5. Error Handling and Validation
+   - GlobalExceptionHandler centralized error handling for all endpoints
+   - 4 custom exception classes: BusinessException, ValidationException,
+     AuthorizationException, ResourceNotFoundException
+   - Standardized error response: timestamp, status, message, path, errors
+   - Validation annotations (@NotBlank, @NotNull, @Min, @Max) applied in DTO requests
+
+6. Security Configuration
+   - JwtTokenProvider: JWT issuance, validation, expiration checking
+   - JwtAuthenticationFilter: request filtering, token extraction, SecurityContext setup
+   - SecurityConfig: filter chain configuration, CORS, role-based endpoint protection
+   - RedisConfig: caching for user list
+
+7. Repository and Mapper
+   - UserAccountRepository with username search, pagination, custom queries
+   - UserAccountMapper (MapStruct) for entity-DTO conversion
+
+
+SKILLS PRACTICED
+
+Core Java: OOP, Collections, Streams, Lambda, Exception handling, Maven
+Spring Boot: MVC, DI/IoC, REST API, Validation, ControllerAdvice, Component scan
+Database: JPA/Hibernate, entity relationships, foreign keys, constraints, transactions,
+          Flyway migration
+Security: JWT token generation/validation, BCrypt password encoding, RBAC,
+          Spring Security filter chain, CORS configuration
+Caching: Redis configuration, service-layer caching
+Mapping: MapStruct DTO mapping, entity conversion
+
+
+OUTCOME
+
+Complete backend API for Phase 1 + Module A + Module B. JWT authentication working
+correctly with access token (15 min) and refresh token (7 days). RBAC enforced for
+each endpoint. UserAdmin controller protected by @Secured(ROLE_ADMIN). Database
+connected successfully, migration runs automatically on application startup. All
+validation errors handled centrally via GlobalExceptionHandler.
+
+Build successful, no compile errors or critical warnings.
+
+
+WEEK 2 PLAN (April 15 - 22, 2026)
+
+Focus: Product Management, Cart Management, Order Management (Module C, D, E).
+
+Planned work:
+- Complete Product CRUD (create, update, delete, list, search, filter)
+- Pagination and filtering by price range and product name
+- Shopping cart management (add/update/remove item, clear cart)
+- Order placement: stock validation, price calculation, automatic shipment creation
+- Order status update (PENDING -> CONFIRMED -> SHIPPED -> DELIVERED)
+- Order cancellation and stock restoration
+- Transactional consistency for order placement & cancellation
+- Product catalog caching in Redis
+
+Skills to practice:
+- Spring Data JPA advanced (query methods, JPQL, custom queries)
+- Pessimistic locking to prevent race conditions during stock updates
+- @Transactional annotation for business logic
+- MapStruct DTO mapping with nested objects
+- Pagination and sorting with Spring Data
+- Cache invalidation strategy
