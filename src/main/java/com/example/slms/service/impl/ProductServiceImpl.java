@@ -1,5 +1,6 @@
 package com.example.slms.service.impl;
 
+import java.net.URI;
 import java.math.BigDecimal;
 
 import org.springframework.data.domain.Page;
@@ -61,6 +62,7 @@ public class ProductServiceImpl implements ProductService {
 		String name = normalizeName(request.getName());
 		validatePrice(request.getPrice());
 		validateStockQuantity(request.getStockQuantity());
+		String imageUrl = normalizeImageUrl(request.getImageUrl());
 
 		if (productRepository.existsByNameIgnoreCase(name)) {
 			throw new ValidationException("Product name already exists");
@@ -70,6 +72,7 @@ public class ProductServiceImpl implements ProductService {
 				.name(name)
 				.price(request.getPrice())
 				.stockQuantity(request.getStockQuantity())
+				.imageUrl(imageUrl)
 				.build();
 
 		Product savedProduct = productRepository.save(product);
@@ -105,8 +108,13 @@ public class ProductServiceImpl implements ProductService {
 			hasUpdate = true;
 		}
 
+		if (request.getImageUrl() != null) {
+			product.setImageUrl(normalizeImageUrl(request.getImageUrl()));
+			hasUpdate = true;
+		}
+
 		if (!hasUpdate) {
-			throw new ValidationException("At least one field (name, price, stockQuantity) must be provided");
+			throw new ValidationException("At least one field (name, price, stockQuantity, imageUrl) must be provided");
 		}
 
 		Product updatedProduct = productRepository.save(product);
@@ -127,9 +135,24 @@ public class ProductServiceImpl implements ProductService {
 	}
 
 	private Specification<Product> buildProductSpecification(String keyword, BigDecimal minPrice, BigDecimal maxPrice) {
-		return Specification.where(hasKeyword(keyword))
-				.and(hasMinPrice(minPrice))
-				.and(hasMaxPrice(maxPrice));
+		Specification<Product> specification = null;
+
+		Specification<Product> keywordSpecification = hasKeyword(keyword);
+		if (keywordSpecification != null) {
+			specification = keywordSpecification;
+		}
+
+		Specification<Product> minPriceSpecification = hasMinPrice(minPrice);
+		if (minPriceSpecification != null) {
+			specification = specification == null ? minPriceSpecification : specification.and(minPriceSpecification);
+		}
+
+		Specification<Product> maxPriceSpecification = hasMaxPrice(maxPrice);
+		if (maxPriceSpecification != null) {
+			specification = specification == null ? maxPriceSpecification : specification.and(maxPriceSpecification);
+		}
+
+		return specification;
 	}
 
 	private Specification<Product> hasKeyword(String keyword) {
@@ -139,7 +162,7 @@ public class ProductServiceImpl implements ProductService {
 
 		String normalizedKeyword = "%" + keyword.trim().toLowerCase() + "%";
 		return (root, query, criteriaBuilder) -> criteriaBuilder.like(
-				criteriaBuilder.lower(root.get("name")),
+				criteriaBuilder.lower(root.get("name").as(String.class)),
 				normalizedKeyword);
 	}
 
@@ -191,5 +214,24 @@ public class ProductServiceImpl implements ProductService {
 		}
 
 		return name.trim();
+	}
+
+	private String normalizeImageUrl(String imageUrl) {
+		if (imageUrl == null || imageUrl.trim().isEmpty()) {
+			throw new ValidationException("imageUrl is required");
+		}
+
+		String normalized = imageUrl.trim();
+		try {
+			URI parsed = URI.create(normalized);
+			String scheme = parsed.getScheme();
+			if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+				throw new ValidationException("imageUrl must be a valid http/https URL");
+			}
+		} catch (IllegalArgumentException ex) {
+			throw new ValidationException("imageUrl must be a valid URL");
+		}
+
+		return normalized;
 	}
 }

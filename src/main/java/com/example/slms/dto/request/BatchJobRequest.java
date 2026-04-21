@@ -11,5 +11,7 @@ public class BatchJobRequest {
     @NotBlank(message = "jobType is required")
     private String jobType;
 
+    private String cron;
+
     private Integer retryCount;
 }

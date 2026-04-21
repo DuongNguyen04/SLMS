@@ -6,6 +6,7 @@ import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -23,4 +24,8 @@ public class ProductCreateRequest {
     @NotNull(message = "stockQuantity is required")
     @PositiveOrZero(message = "stockQuantity must be greater than or equal to 0")
     private Integer stockQuantity;
+
+    @NotBlank(message = "imageUrl is required")
+    @Size(max = 500, message = "imageUrl must not exceed 500 characters")
+    private String imageUrl;
 }

@@ -1,5 +1,9 @@
 package com.example.slms.service.impl;
 
+import jakarta.persistence.PessimisticLockException;
+
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +29,7 @@ import com.example.slms.entity.Shipment;
 import com.example.slms.entity.enums.OrderStatus;
 import com.example.slms.entity.enums.ShipmentStatus;
 import com.example.slms.exception.BusinessException;
+import com.example.slms.exception.ConcurrencyException;
 import com.example.slms.exception.ValidationException;
 import com.example.slms.repository.CartRepository;
 import com.example.slms.repository.CustomerOrderRepository;
@@ -38,6 +43,8 @@ import lombok.RequiredArgsConstructor;
 public class OrderServiceImpl implements OrderService {
 
 	private static final String WAREHOUSE_LOCATION = "Warehouse";
+	private static final String CONCURRENCY_MESSAGE =
+			"Concurrent stock update detected. Please retry the operation.";
 
 	private final CartRepository cartRepository;
 	private final CustomerOrderRepository customerOrderRepository;
@@ -46,61 +53,74 @@ public class OrderServiceImpl implements OrderService {
 	@Override
 	@Transactional
 	public OrderResponse placeOrder(String customerUsername, PlaceOrderRequest request) {
-		Cart cart = cartRepository.findByCustomerUsername(customerUsername)
-				.orElseThrow(() -> new BusinessException("Cart not found", HttpStatus.NOT_FOUND));
+		try {
+			Cart cart = cartRepository.findByCustomerUsername(customerUsername)
+					.orElseThrow(() -> new BusinessException("Cart not found", HttpStatus.NOT_FOUND));
 
-		if (cart.getItems().isEmpty()) {
-			throw new ValidationException("Order must contain at least one item");
-		}
-
-		CustomerOrder order = CustomerOrder.builder()
-				.orderId(generateOrderId())
-				.customerUsername(customerUsername)
-				.status(OrderStatus.PENDING)
-				.totalPrice(BigDecimal.ZERO)
-				.build();
-
-		List<OrderItem> orderItems = new ArrayList<>();
-		BigDecimal totalPrice = BigDecimal.ZERO;
-
-		for (CartItem cartItem : cart.getItems()) {
-			Product lockedProduct = productRepository.findByIdForUpdate(cartItem.getProduct().getId())
-					.orElseThrow(() -> new BusinessException("Product not found", HttpStatus.NOT_FOUND));
-
-			if (cartItem.getQuantity() > lockedProduct.getStockQuantity()) {
-				throw new ValidationException("Insufficient stock for product: " + lockedProduct.getName());
+			if (cart.getItems().isEmpty()) {
+				throw new ValidationException("Order must contain at least one item");
 			}
 
-			lockedProduct.setStockQuantity(lockedProduct.getStockQuantity() - cartItem.getQuantity());
-
-			OrderItem orderItem = OrderItem.builder()
-					.customerOrder(order)
-					.product(lockedProduct)
-					.quantity(cartItem.getQuantity())
-					.unitPrice(lockedProduct.getPrice())
+			CustomerOrder order = CustomerOrder.builder()
+					.orderId(generateOrderId())
+					.customerUsername(customerUsername)
+					.status(OrderStatus.PENDING)
+					.totalPrice(BigDecimal.ZERO)
 					.build();
-			orderItems.add(orderItem);
 
-			BigDecimal lineTotal = lockedProduct.getPrice().multiply(BigDecimal.valueOf(cartItem.getQuantity()));
-			totalPrice = totalPrice.add(lineTotal);
+			List<OrderItem> orderItems = new ArrayList<>();
+			BigDecimal totalPrice = BigDecimal.ZERO;
+
+			for (CartItem cartItem : cart.getItems()) {
+				if (cartItem.getQuantity() == null || cartItem.getQuantity() <= 0) {
+					throw new ValidationException("Invalid cart item quantity for product: "
+							+ cartItem.getProduct().getName());
+				}
+
+				Product lockedProduct = productRepository.findByIdForUpdate(cartItem.getProduct().getId())
+						.orElseThrow(() -> new BusinessException("Product not found", HttpStatus.NOT_FOUND));
+
+				if (cartItem.getQuantity() > lockedProduct.getStockQuantity()) {
+					throw new ValidationException("Insufficient stock for product: " + lockedProduct.getName());
+				}
+
+				lockedProduct.setStockQuantity(lockedProduct.getStockQuantity() - cartItem.getQuantity());
+
+				OrderItem orderItem = OrderItem.builder()
+						.customerOrder(order)
+						.product(lockedProduct)
+						.quantity(cartItem.getQuantity())
+						.unitPrice(lockedProduct.getPrice())
+						.build();
+				orderItems.add(orderItem);
+
+				BigDecimal lineTotal = lockedProduct.getPrice().multiply(BigDecimal.valueOf(cartItem.getQuantity()));
+				totalPrice = totalPrice.add(lineTotal);
+			}
+
+			order.setItems(orderItems);
+			order.setTotalPrice(totalPrice);
+
+			Shipment shipment = Shipment.builder()
+					.customerOrder(order)
+					.status(ShipmentStatus.CREATED)
+					.currentLocation(WAREHOUSE_LOCATION)
+					.build();
+			order.setShipment(shipment);
+
+			CustomerOrder savedOrder = customerOrderRepository.save(order);
+
+			cart.getItems().clear();
+			cartRepository.save(cart);
+
+			return toOrderResponse(savedOrder, true);
+		} catch (RuntimeException ex) {
+			if (isConcurrencyConflict(ex)) {
+				throw new ConcurrencyException(CONCURRENCY_MESSAGE);
+			}
+
+			throw ex;
 		}
-
-		order.setItems(orderItems);
-		order.setTotalPrice(totalPrice);
-
-		Shipment shipment = Shipment.builder()
-				.customerOrder(order)
-				.status(ShipmentStatus.CREATED)
-				.currentLocation(WAREHOUSE_LOCATION)
-				.build();
-		order.setShipment(shipment);
-
-		CustomerOrder savedOrder = customerOrderRepository.save(order);
-
-		cart.getItems().clear();
-		cartRepository.save(cart);
-
-		return toOrderResponse(savedOrder, true);
 	}
 
 	@Override
@@ -155,30 +175,38 @@ public class OrderServiceImpl implements OrderService {
 	@Override
 	@Transactional
 	public OrderResponse cancelOrder(String orderId, String requesterUsername, boolean isAdmin) {
-		CustomerOrder order = findOrderByIdOrThrow(orderId);
+		try {
+			CustomerOrder order = findOrderByIdOrThrow(orderId);
 
-		if (!isAdmin && !order.getCustomerUsername().equals(requesterUsername)) {
-			throw new BusinessException("You are not allowed to access this order", HttpStatus.FORBIDDEN);
+			if (!isAdmin && !order.getCustomerUsername().equals(requesterUsername)) {
+				throw new BusinessException("You are not allowed to access this order", HttpStatus.FORBIDDEN);
+			}
+
+			if (order.getStatus() != OrderStatus.PENDING) {
+				throw new ValidationException("Order can only be cancelled when status is PENDING");
+			}
+
+			for (OrderItem item : order.getItems()) {
+				Product lockedProduct = productRepository.findByIdForUpdate(item.getProduct().getId())
+						.orElseThrow(() -> new BusinessException("Product not found", HttpStatus.NOT_FOUND));
+
+				lockedProduct.setStockQuantity(lockedProduct.getStockQuantity() + item.getQuantity());
+			}
+
+			order.setStatus(OrderStatus.CANCELLED);
+			if (order.getShipment() != null) {
+				order.getShipment().setCurrentLocation("Order Cancelled");
+			}
+
+			CustomerOrder updatedOrder = customerOrderRepository.save(order);
+			return toOrderResponse(updatedOrder, true);
+		} catch (RuntimeException ex) {
+			if (isConcurrencyConflict(ex)) {
+				throw new ConcurrencyException(CONCURRENCY_MESSAGE);
+			}
+
+			throw ex;
 		}
-
-		if (order.getStatus() != OrderStatus.PENDING) {
-			throw new ValidationException("Order can only be cancelled when status is PENDING");
-		}
-
-		for (OrderItem item : order.getItems()) {
-			Product lockedProduct = productRepository.findByIdForUpdate(item.getProduct().getId())
-					.orElseThrow(() -> new BusinessException("Product not found", HttpStatus.NOT_FOUND));
-
-			lockedProduct.setStockQuantity(lockedProduct.getStockQuantity() + item.getQuantity());
-		}
-
-		order.setStatus(OrderStatus.CANCELLED);
-		if (order.getShipment() != null) {
-			order.getShipment().setCurrentLocation("Order Cancelled");
-		}
-
-		CustomerOrder updatedOrder = customerOrderRepository.save(order);
-		return toOrderResponse(updatedOrder, true);
 	}
 
 	private CustomerOrder findOrderByIdOrThrow(String orderId) {
@@ -236,6 +264,20 @@ public class OrderServiceImpl implements OrderService {
 		return orderId;
 	}
 
+	private boolean isConcurrencyConflict(Throwable throwable) {
+		Throwable current = throwable;
+		while (current != null) {
+			if (current instanceof CannotAcquireLockException
+					|| current instanceof PessimisticLockException
+					|| current instanceof PessimisticLockingFailureException) {
+				return true;
+			}
+			current = current.getCause();
+		}
+
+		return false;
+	}
+
 	private OrderResponse toOrderResponse(CustomerOrder order, boolean includeDetails) {
 		OrderResponse.OrderResponseBuilder builder = OrderResponse.builder()
 				.orderId(order.getOrderId())
@@ -250,6 +292,7 @@ public class OrderServiceImpl implements OrderService {
 		List<OrderResponse.OrderItemData> itemData = order.getItems().stream()
 				.map(item -> OrderResponse.OrderItemData.builder()
 						.productName(item.getProduct().getName())
+						.imageUrl(item.getProduct().getImageUrl())
 						.quantity(item.getQuantity())
 						.unitPrice(item.getUnitPrice())
 						.build())

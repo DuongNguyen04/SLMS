@@ -17,7 +17,14 @@ public interface CartMapper {
     CartResponse toResponse(Cart entity);
 
     @Mapping(target = "productName", source = "product.name")
+    @Mapping(target = "imageUrl", source = "product.imageUrl")
+    @Mapping(target = "unitPrice", source = "product.price")
+    @Mapping(target = "subtotal", expression = "java(calculateSubtotal(item))")
     CartResponse.CartItemData toItemData(CartItem item);
+
+    default BigDecimal calculateSubtotal(CartItem item) {
+        return item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+    }
 
     default BigDecimal calculateTotal(List<CartItem> items) {
         return items.stream()

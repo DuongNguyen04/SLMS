@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -18,4 +19,7 @@ public class ProductUpdateRequest {
 
     @PositiveOrZero(message = "stockQuantity must be greater than or equal to 0")
     private Integer stockQuantity;
+
+    @Size(max = 500, message = "imageUrl must not exceed 500 characters")
+    private String imageUrl;
 }
