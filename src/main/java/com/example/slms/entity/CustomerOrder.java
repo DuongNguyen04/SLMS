@@ -41,6 +41,12 @@ public class CustomerOrder {
     @Column(name = "customer_username", nullable = false, length = 100)
     private String customerUsername;
 
+    @Column(name = "shipping_address", nullable = false, length = 255)
+    private String shippingAddress;
+
+    @Column(name = "phone_number", nullable = false, length = 30)
+    private String phoneNumber;
+
     @Column(name = "total_price", nullable = false, precision = 19, scale = 2)
     private BigDecimal totalPrice;
 

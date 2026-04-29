@@ -7,5 +7,9 @@ import lombok.Setter;
 @Setter
 public class PlaceOrderRequest {
 
+    private String shippingAddress;
+
+    private String phoneNumber;
+
     private String note;
 }

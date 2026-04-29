@@ -61,9 +61,25 @@ public class OrderServiceImpl implements OrderService {
 				throw new ValidationException("Order must contain at least one item");
 			}
 
+			String shippingAddress = request.getShippingAddress() == null
+					? ""
+					: request.getShippingAddress().trim();
+			if (shippingAddress.isEmpty()) {
+				throw new ValidationException("shippingAddress is required");
+			}
+
+			String phoneNumber = request.getPhoneNumber() == null
+					? ""
+					: request.getPhoneNumber().trim();
+			if (phoneNumber.isEmpty()) {
+				throw new ValidationException("phoneNumber is required");
+			}
+
 			CustomerOrder order = CustomerOrder.builder()
 					.orderId(generateOrderId())
 					.customerUsername(customerUsername)
+					.shippingAddress(shippingAddress)
+					.phoneNumber(phoneNumber)
 					.status(OrderStatus.PENDING)
 					.totalPrice(BigDecimal.ZERO)
 					.build();
@@ -282,6 +298,8 @@ public class OrderServiceImpl implements OrderService {
 		OrderResponse.OrderResponseBuilder builder = OrderResponse.builder()
 				.orderId(order.getOrderId())
 				.customerUsername(order.getCustomerUsername())
+				.shippingAddress(order.getShippingAddress())
+				.phoneNumber(order.getPhoneNumber())
 				.totalPrice(order.getTotalPrice())
 				.status(order.getStatus());
 

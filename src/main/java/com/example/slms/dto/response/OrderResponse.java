@@ -21,6 +21,8 @@ public class OrderResponse {
 
     private String orderId;
     private String customerUsername;
+    private String shippingAddress;
+    private String phoneNumber;
     private BigDecimal totalPrice;
     private OrderStatus status;
     private List<OrderItemData> items;
