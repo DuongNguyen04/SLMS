@@ -66,17 +66,14 @@ class ShipmentServiceImplTest {
             return ShipmentResponse.builder()
                     .orderId(value.getCustomerOrder().getOrderId())
                     .status(value.getStatus())
-                    .currentLocation(value.getCurrentLocation())
                     .build();
         });
 
         ShipmentUpdateRequest request = new ShipmentUpdateRequest();
         request.setStatus(ShipmentStatus.IN_TRANSIT);
-        request.setCurrentLocation("Distribution Center");
 
         ShipmentResponse response = shipmentService.updateShipment("ORD-002", request);
 
         assertEquals(ShipmentStatus.IN_TRANSIT, response.getStatus());
-        assertEquals("Distribution Center", response.getCurrentLocation());
     }
 }

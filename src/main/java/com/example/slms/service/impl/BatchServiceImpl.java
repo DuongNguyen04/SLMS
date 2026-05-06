@@ -1,30 +1,55 @@
 package com.example.slms.service.impl;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ScheduledFuture;
 
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.support.CronTrigger;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.example.slms.dto.request.BatchJobRequest;
 import com.example.slms.dto.response.BatchJobResponse;
+import com.example.slms.entity.BatchJobLog;
+import com.example.slms.entity.BatchJobSchedule;
+import com.example.slms.entity.CustomerOrder;
+import com.example.slms.entity.Product;
+import com.example.slms.entity.SalesAggregate;
+import com.example.slms.entity.enums.OrderStatus;
 import com.example.slms.exception.BusinessException;
 import com.example.slms.exception.ValidationException;
 import com.example.slms.mapper.BatchMapper;
+import com.example.slms.repository.BatchJobLogRepository;
+import com.example.slms.repository.BatchJobScheduleRepository;
 import com.example.slms.repository.CustomerOrderRepository;
 import com.example.slms.repository.ProductRepository;
+import com.example.slms.repository.SalesAggregateRepository;
 import com.example.slms.service.BatchService;
+import com.example.slms.service.ReportService;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 
 @Service
@@ -39,9 +64,24 @@ public class BatchServiceImpl implements BatchService {
 	private final BatchMapper batchMapper;
 	private final ProductRepository productRepository;
 	private final CustomerOrderRepository customerOrderRepository;
+	private final BatchJobScheduleRepository batchJobScheduleRepository;
+	private final BatchJobLogRepository batchJobLogRepository;
+	private final SalesAggregateRepository salesAggregateRepository;
+	private final ReportService reportService;
+	private final TaskScheduler taskScheduler;
 
-	private final Map<String, String> scheduledJobs = new ConcurrentHashMap<>();
-	private final List<BatchLogEntry> logs = new CopyOnWriteArrayList<>();
+	@Value("${slms.batch.import-products-path:storage/imports/products.csv}")
+	private String importProductsPath;
+
+	private final Map<String, ScheduledFuture<?>> scheduledTasks = new ConcurrentHashMap<>();
+
+	@PostConstruct
+	void initializeSchedules() {
+		List<BatchJobSchedule> schedules = batchJobScheduleRepository.findByActiveTrue();
+		for (BatchJobSchedule schedule : schedules) {
+			scheduleTask(schedule.getJobType(), schedule.getCron());
+		}
+	}
 
 	@Override
 	@Transactional
@@ -49,9 +89,16 @@ public class BatchServiceImpl implements BatchService {
 		String jobType = normalizeJobType(request.getJobType());
 		String cron = normalizeCron(request.getCron());
 
-		scheduledJobs.put(jobType, cron);
+		BatchJobSchedule schedule = batchJobScheduleRepository.findByJobType(jobType)
+				.orElseGet(BatchJobSchedule::new);
+		schedule.setJobType(jobType);
+		schedule.setCron(cron);
+		schedule.setActive(true);
+		batchJobScheduleRepository.save(schedule);
+
+		scheduleTask(jobType, cron);
 		BatchJobResponse response = batchMapper.toResponse(jobType, "SCHEDULED", "Job scheduled: " + cron);
-		addLog(response);
+		appendLog(response);
 		return response;
 	}
 
@@ -60,7 +107,7 @@ public class BatchServiceImpl implements BatchService {
 	public BatchJobResponse runJob(BatchJobRequest request) {
 		String jobType = normalizeJobType(request.getJobType());
 		BatchJobResponse response = executeJob(jobType);
-		addLog(response);
+		appendLog(response);
 		return response;
 	}
 
@@ -73,69 +120,168 @@ public class BatchServiceImpl implements BatchService {
 			throw new ValidationException("retryCount must be greater than 0");
 		}
 
-		BatchLogEntry latestFailed = findLatestFailedLog(jobType);
+		BatchJobLog latestFailed = batchJobLogRepository
+				.findTopByJobTypeAndStatusOrderByCreatedAtDesc(jobType, "FAILED")
+				.orElse(null);
 		if (latestFailed == null) {
 			throw new ValidationException("Retry is not allowed because no failed job execution was found");
 		}
 
-		BatchJobResponse response = batchMapper.toResponse(
-				jobType,
-				"RETRY_ACCEPTED",
-				"Retry accepted for latest failed execution");
-		addLog(response);
+		BatchJobResponse response = executeJob(jobType);
+		appendLog(response);
 		return response;
 	}
 
 	@Override
 	@Transactional(readOnly = true)
 	public Page<BatchJobResponse> listLogs(int page, int size, String jobType) {
-		List<BatchLogEntry> entries = new ArrayList<>(logs);
-		entries.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
+		Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+		Page<BatchJobLog> logs = (jobType == null || jobType.trim().isEmpty())
+				? batchJobLogRepository.findAll(pageable)
+				: batchJobLogRepository.findByJobType(normalizeJobType(jobType), pageable);
 
-		final String normalizedJobType = (jobType != null && !jobType.trim().isEmpty())
-				? normalizeJobType(jobType)
-				: null;
-
-		List<BatchJobResponse> filtered = entries.stream()
-				.map(BatchLogEntry::response)
-				.filter(item -> normalizedJobType == null || item.getJobType().equals(normalizedJobType))
-				.toList();
-
-		if (filtered.isEmpty()) {
+		if (logs.isEmpty()) {
 			throw new BusinessException("No logs found", HttpStatus.NOT_FOUND);
 		}
 
-		int fromIndex = page * size;
-		if (fromIndex >= filtered.size()) {
-			throw new BusinessException("No logs found", HttpStatus.NOT_FOUND);
-		}
+		return logs.map(log -> batchMapper.toResponse(log.getJobType(), log.getStatus(), log.getMessage()));
+	}
 
-		int toIndex = Math.min(fromIndex + size, filtered.size());
-		List<BatchJobResponse> content = filtered.subList(fromIndex, toIndex);
-		return new PageImpl<>(content, PageRequest.of(page, size), filtered.size());
+	private void scheduleTask(String jobType, String cron) {
+		ScheduledFuture<?> existing = scheduledTasks.get(jobType);
+		if (existing != null) {
+			existing.cancel(false);
+		}
+		ScheduledFuture<?> future = taskScheduler.schedule(
+				() -> runScheduledJob(jobType),
+				new CronTrigger(cron));
+		scheduledTasks.put(jobType, future);
+	}
+
+	private void runScheduledJob(String jobType) {
+		BatchJobResponse response = executeJob(jobType);
+		appendLog(response);
 	}
 
 	private BatchJobResponse executeJob(String jobType) {
-		return switch (jobType) {
-			case "IMPORT_PRODUCT_DATA" -> batchMapper.toResponse(
-					jobType,
-					"STARTED",
-					"Product import started successfully");
-			case "GENERATE_DAILY_REPORTS" -> {
-				boolean hasData = productRepository.count() > 0 || customerOrderRepository.count() > 0;
-				if (!hasData) {
-					yield batchMapper.toResponse(jobType, "FAILED", "No data available for daily report generation");
+		try {
+			return switch (jobType) {
+				case "IMPORT_PRODUCT_DATA" -> importProductData();
+				case "GENERATE_DAILY_REPORTS" -> generateDailyReports();
+				case "AGGREGATE_SALES_DATA" -> aggregateSalesData();
+				default -> throw new ValidationException("Unsupported job type");
+			};
+		} catch (RuntimeException ex) {
+			return batchMapper.toResponse(jobType, "FAILED", ex.getMessage());
+		}
+	}
+
+	private BatchJobResponse importProductData() {
+		Path path = Paths.get(importProductsPath).toAbsolutePath().normalize();
+		if (!Files.exists(path)) {
+			return batchMapper.toResponse("IMPORT_PRODUCT_DATA", "FAILED",
+					"Import file not found: " + path);
+		}
+
+		int created = 0;
+		int updated = 0;
+		try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8);
+				CSVParser parser = CSVFormat.DEFAULT
+						.withFirstRecordAsHeader()
+						.withIgnoreEmptyLines()
+						.withTrim()
+						.parse(reader)) {
+			for (CSVRecord record : parser) {
+				String name = getCsvValue(record, "name");
+				if (name == null || name.trim().isEmpty()) {
+					throw new ValidationException("Product name is required");
 				}
-				yield batchMapper.toResponse(jobType, "STARTED", "Daily report generation started successfully");
-			}
-			case "AGGREGATE_SALES_DATA" -> {
-				if (customerOrderRepository.count() == 0) {
-					yield batchMapper.toResponse(jobType, "FAILED", "No order data available for sales aggregation");
+				BigDecimal price = new BigDecimal(getCsvValue(record, "price"));
+				int stock = Integer.parseInt(getCsvValue(record, "stock_quantity", "stockQuantity"));
+				String imageUrl = getCsvValue(record, "image_url", "imageUrl");
+
+				if (price.compareTo(BigDecimal.ZERO) <= 0) {
+					throw new ValidationException("Product price must be greater than 0");
 				}
-				yield batchMapper.toResponse(jobType, "STARTED", "Sales aggregation started successfully");
+				if (stock < 0) {
+					throw new ValidationException("Product stock must be non-negative");
+				}
+
+				Product product = productRepository.findByNameIgnoreCase(name).orElse(null);
+				if (product == null) {
+					product = Product.builder().name(name.trim()).build();
+					created++;
+				} else {
+					updated++;
+				}
+
+				product.setPrice(price);
+				product.setStockQuantity(stock);
+				if (imageUrl != null && !imageUrl.trim().isEmpty()) {
+					product.setImageUrl(imageUrl.trim());
+				}
+
+				productRepository.save(product);
 			}
-			default -> throw new ValidationException("Unsupported job type");
-		};
+		} catch (IOException ex) {
+			return batchMapper.toResponse("IMPORT_PRODUCT_DATA", "FAILED", "Import failed: " + ex.getMessage());
+		}
+
+		String message = "Import completed. Created: " + created + ", Updated: " + updated;
+		return batchMapper.toResponse("IMPORT_PRODUCT_DATA", "COMPLETED", message);
+	}
+
+	private String getCsvValue(CSVRecord record, String... keys) {
+		for (String key : keys) {
+			if (record.isMapped(key)) {
+				return record.get(key);
+			}
+		}
+		throw new ValidationException("Missing required CSV column: " + keys[0]);
+	}
+
+	private BatchJobResponse generateDailyReports() {
+		LocalDate targetDate = LocalDate.now().minusDays(1);
+		try {
+			reportService.generateSalesReport(targetDate, targetDate, "PDF");
+			reportService.generateSalesReport(targetDate, targetDate, "EXCEL");
+			reportService.generateInventoryReport(targetDate, targetDate, "PDF");
+			reportService.generateInventoryReport(targetDate, targetDate, "EXCEL");
+		} catch (RuntimeException ex) {
+			return batchMapper.toResponse("GENERATE_DAILY_REPORTS", "FAILED", ex.getMessage());
+		}
+
+		return batchMapper.toResponse("GENERATE_DAILY_REPORTS", "COMPLETED",
+				"Daily reports generated for " + targetDate);
+	}
+
+	private BatchJobResponse aggregateSalesData() {
+		LocalDate targetDate = LocalDate.now().minusDays(1);
+		LocalDateTime start = targetDate.atStartOfDay();
+		LocalDateTime end = targetDate.atTime(23, 59, 59);
+		List<CustomerOrder> orders = customerOrderRepository.findByCreatedAtBetween(start, end).stream()
+				.filter(order -> order.getStatus() == OrderStatus.CONFIRMED
+						|| order.getStatus() == OrderStatus.SHIPPED
+						|| order.getStatus() == OrderStatus.DELIVERED)
+				.toList();
+
+		if (orders.isEmpty()) {
+			return batchMapper.toResponse("AGGREGATE_SALES_DATA", "FAILED",
+					"No order data available for sales aggregation");
+		}
+
+		BigDecimal totalRevenue = orders.stream()
+				.map(CustomerOrder::getTotalPrice)
+				.reduce(BigDecimal.ZERO, BigDecimal::add);
+
+		SalesAggregate aggregate = salesAggregateRepository.findByReportDate(targetDate)
+				.orElseGet(() -> SalesAggregate.builder().reportDate(targetDate).build());
+		aggregate.setOrderCount(orders.size());
+		aggregate.setTotalRevenue(totalRevenue);
+		salesAggregateRepository.save(aggregate);
+
+		return batchMapper.toResponse("AGGREGATE_SALES_DATA", "COMPLETED",
+				"Aggregated " + orders.size() + " orders for " + targetDate);
 	}
 
 	private String normalizeJobType(String jobType) {
@@ -159,20 +305,12 @@ public class BatchServiceImpl implements BatchService {
 		return cron.trim();
 	}
 
-	private BatchLogEntry findLatestFailedLog(String jobType) {
-		List<BatchLogEntry> entries = new ArrayList<>(logs);
-		entries.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
-		return entries.stream()
-				.filter(item -> item.response().getJobType().equals(jobType))
-				.filter(item -> "FAILED".equals(item.response().getStatus()))
-				.findFirst()
-				.orElse(null);
-	}
-
-	private void addLog(BatchJobResponse response) {
-		logs.add(new BatchLogEntry(LocalDateTime.now(), response));
-	}
-
-	private record BatchLogEntry(LocalDateTime createdAt, BatchJobResponse response) {
+	private void appendLog(BatchJobResponse response) {
+		BatchJobLog log = BatchJobLog.builder()
+				.jobType(response.getJobType())
+				.status(response.getStatus())
+				.message(response.getMessage())
+				.build();
+		batchJobLogRepository.save(log);
 	}
 }

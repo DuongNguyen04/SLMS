@@ -2,6 +2,7 @@ package com.example.slms.repository;
 
 import java.util.List;
 import java.util.Optional;
+import java.time.LocalDateTime;
 
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -21,4 +22,6 @@ public interface CustomerOrderRepository extends JpaRepository<CustomerOrder, Lo
     Page<CustomerOrder> findByStatus(OrderStatus status, Pageable pageable);
 
     Page<CustomerOrder> findByCustomerUsernameAndStatus(String customerUsername, OrderStatus status, Pageable pageable);
+
+    List<CustomerOrder> findByCreatedAtBetween(LocalDateTime start, LocalDateTime end);
 }

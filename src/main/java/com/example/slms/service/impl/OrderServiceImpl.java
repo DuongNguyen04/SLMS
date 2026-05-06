@@ -173,19 +173,33 @@ public class OrderServiceImpl implements OrderService {
 	@Override
 	@Transactional
 	public OrderResponse updateOrderStatus(String orderId, OrderStatusUpdateRequest request) {
-		CustomerOrder order = findOrderByIdOrThrow(orderId);
-		OrderStatus currentStatus = order.getStatus();
-		OrderStatus targetStatus = request.getStatus();
+		try {
+			CustomerOrder order = findOrderByIdOrThrow(orderId);
+			OrderStatus currentStatus = order.getStatus();
+			OrderStatus targetStatus = request.getStatus();
 
-		if (!isValidStatusTransition(currentStatus, targetStatus)) {
-			throw new ValidationException("Invalid order status transition: " + currentStatus + " -> " + targetStatus);
+			if (targetStatus == OrderStatus.CANCELLED) {
+				cancelOrderForOps(order);
+				CustomerOrder updatedOrder = customerOrderRepository.save(order);
+				return toOrderResponse(updatedOrder, true);
+			}
+
+			if (!isValidStatusTransition(currentStatus, targetStatus)) {
+				throw new ValidationException("Invalid order status transition: " + currentStatus + " -> " + targetStatus);
+			}
+
+			order.setStatus(targetStatus);
+			syncShipmentWithOrderStatus(order, targetStatus);
+			CustomerOrder updatedOrder = customerOrderRepository.save(order);
+
+			return toOrderResponse(updatedOrder, true);
+		} catch (RuntimeException ex) {
+			if (isConcurrencyConflict(ex)) {
+				throw new ConcurrencyException(CONCURRENCY_MESSAGE);
+			}
+
+			throw ex;
 		}
-
-		order.setStatus(targetStatus);
-		syncShipmentWithOrderStatus(order, targetStatus);
-		CustomerOrder updatedOrder = customerOrderRepository.save(order);
-
-		return toOrderResponse(updatedOrder, true);
 	}
 
 	@Override
@@ -210,9 +224,6 @@ public class OrderServiceImpl implements OrderService {
 			}
 
 			order.setStatus(OrderStatus.CANCELLED);
-			if (order.getShipment() != null) {
-				order.getShipment().setCurrentLocation("Order Cancelled");
-			}
 
 			CustomerOrder updatedOrder = customerOrderRepository.save(order);
 			return toOrderResponse(updatedOrder, true);
@@ -253,6 +264,21 @@ public class OrderServiceImpl implements OrderService {
 		};
 	}
 
+	private void cancelOrderForOps(CustomerOrder order) {
+		OrderStatus currentStatus = order.getStatus();
+		if (currentStatus != OrderStatus.PENDING && currentStatus != OrderStatus.CONFIRMED) {
+			throw new ValidationException("Order can only be cancelled when status is PENDING or CONFIRMED");
+		}
+
+		for (OrderItem item : order.getItems()) {
+			Product lockedProduct = productRepository.findByIdForUpdate(item.getProduct().getId())
+					.orElseThrow(() -> new BusinessException("Product not found", HttpStatus.NOT_FOUND));
+			lockedProduct.setStockQuantity(lockedProduct.getStockQuantity() + item.getQuantity());
+		}
+
+		order.setStatus(OrderStatus.CANCELLED);
+	}
+
 	private void syncShipmentWithOrderStatus(CustomerOrder order, OrderStatus targetStatus) {
 		Shipment shipment = order.getShipment();
 		if (shipment == null) {
@@ -261,12 +287,10 @@ public class OrderServiceImpl implements OrderService {
 
 		if (targetStatus == OrderStatus.SHIPPED && shipment.getStatus() == ShipmentStatus.CREATED) {
 			shipment.setStatus(ShipmentStatus.IN_TRANSIT);
-			shipment.setCurrentLocation("In Transit");
 		}
 
 		if (targetStatus == OrderStatus.DELIVERED && shipment.getStatus() == ShipmentStatus.IN_TRANSIT) {
 			shipment.setStatus(ShipmentStatus.DELIVERED);
-			shipment.setCurrentLocation("Delivered");
 		}
 	}
 
@@ -322,7 +346,6 @@ public class OrderServiceImpl implements OrderService {
 			builder.shipment(OrderResponse.ShipmentData.builder()
 					.orderId(order.getOrderId())
 					.status(order.getShipment().getStatus())
-					.currentLocation(order.getShipment().getCurrentLocation())
 					.build());
 		}
 

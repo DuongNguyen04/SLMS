@@ -69,22 +69,22 @@ public class UserAdminServiceImpl implements UserAdminService {
 
 		boolean hasUpdate = false;
 		if (request.getPassword() != null) {
-			String rawPassword = request.getPassword().trim();
-			if (rawPassword.isEmpty()) {
-				throw new ValidationException("password must not be blank");
-			}
-
-			user.setPassword(passwordEncoder.encode(rawPassword));
-			hasUpdate = true;
+			throw new ValidationException("Password updates are not allowed in admin user management");
 		}
 
 		if (request.getRole() != null) {
-			user.setRole(request.getRole());
-			hasUpdate = true;
+			if (user.getRole() == Role.ADMIN && request.getRole() != Role.ADMIN) {
+				throw new ValidationException("Admin role cannot be changed");
+			}
+
+			if (request.getRole() != user.getRole()) {
+				user.setRole(request.getRole());
+				hasUpdate = true;
+			}
 		}
 
 		if (!hasUpdate) {
-			throw new ValidationException("At least one field (password or role) must be provided");
+			throw new ValidationException("At least one field (role) must be provided");
 		}
 
 		UserAccount updatedUser = userAccountRepository.save(user);

@@ -17,5 +17,4 @@ public class ShipmentResponse {
 
     private String orderId;
     private ShipmentStatus status;
-    private String currentLocation;
 }

@@ -17,4 +17,5 @@ public class ReportResponse {
     private String exportFormat;
     private String fileName;
     private String status;
+    private String downloadUrl;
 }

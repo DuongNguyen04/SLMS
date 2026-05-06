@@ -48,6 +48,5 @@ public class OrderResponse {
     public static class ShipmentData {
         private String orderId;
         private ShipmentStatus status;
-        private String currentLocation;
     }
 }

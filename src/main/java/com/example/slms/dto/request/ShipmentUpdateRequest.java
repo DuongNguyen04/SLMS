@@ -10,6 +10,4 @@ import lombok.Setter;
 public class ShipmentUpdateRequest {
 
     private ShipmentStatus status;
-
-    private String currentLocation;
 }

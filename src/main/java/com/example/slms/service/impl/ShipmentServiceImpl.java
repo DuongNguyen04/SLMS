@@ -39,32 +39,18 @@ public class ShipmentServiceImpl implements ShipmentService {
 	public ShipmentResponse updateShipment(String orderId, ShipmentUpdateRequest request) {
 		Shipment shipment = findShipmentByOrderIdOrThrow(orderId);
 
-		boolean hasUpdate = false;
-		if (request.getStatus() != null) {
-			ShipmentStatus currentStatus = shipment.getStatus();
-			ShipmentStatus targetStatus = request.getStatus();
-			if (!isValidTransition(currentStatus, targetStatus)) {
-				throw new ValidationException(
-						"Invalid shipment status transition: " + currentStatus + " -> " + targetStatus);
-			}
-
-			shipment.setStatus(targetStatus);
-			hasUpdate = true;
+		ShipmentStatus targetStatus = request.getStatus();
+		if (targetStatus == null) {
+			throw new ValidationException("status is required");
 		}
 
-		if (request.getCurrentLocation() != null) {
-			String location = request.getCurrentLocation().trim();
-			if (location.isEmpty()) {
-				throw new ValidationException("currentLocation must not be blank");
-			}
-
-			shipment.setCurrentLocation(location);
-			hasUpdate = true;
+		ShipmentStatus currentStatus = shipment.getStatus();
+		if (!isValidTransition(currentStatus, targetStatus)) {
+			throw new ValidationException(
+					"Invalid shipment status transition: " + currentStatus + " -> " + targetStatus);
 		}
 
-		if (!hasUpdate) {
-			throw new ValidationException("At least one field (status or currentLocation) must be provided");
-		}
+		shipment.setStatus(targetStatus);
 
 		Shipment updatedShipment = shipmentRepository.save(shipment);
 		return shipmentMapper.toResponse(updatedShipment);
