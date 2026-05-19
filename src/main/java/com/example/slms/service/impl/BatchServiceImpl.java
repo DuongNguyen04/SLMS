@@ -2,11 +2,13 @@ package com.example.slms.service.impl;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -29,9 +31,12 @@ import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.support.CronTrigger;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
 import com.example.slms.dto.request.BatchJobRequest;
 import com.example.slms.dto.response.BatchJobResponse;
+import com.example.slms.dto.response.ReportResponse;
+import com.example.slms.dto.response.SalesSummaryResponse;
 import com.example.slms.entity.BatchJobLog;
 import com.example.slms.entity.BatchJobSchedule;
 import com.example.slms.entity.CustomerOrder;
@@ -106,7 +111,7 @@ public class BatchServiceImpl implements BatchService {
 	@Transactional
 	public BatchJobResponse runJob(BatchJobRequest request) {
 		String jobType = normalizeJobType(request.getJobType());
-		BatchJobResponse response = executeJob(jobType);
+		BatchJobResponse response = executeJob(jobType, request);
 		appendLog(response);
 		return response;
 	}
@@ -127,7 +132,37 @@ public class BatchServiceImpl implements BatchService {
 			throw new ValidationException("Retry is not allowed because no failed job execution was found");
 		}
 
-		BatchJobResponse response = executeJob(jobType);
+		BatchJobResponse response = executeJob(jobType, request);
+		appendLog(response);
+		return response;
+	}
+
+	@Override
+	@Transactional
+	public BatchJobResponse uploadImportFile(MultipartFile file) {
+		if (file == null || file.isEmpty()) {
+			throw new ValidationException("Import file is required");
+		}
+
+		String filename = file.getOriginalFilename();
+		if (filename != null && !filename.toLowerCase(Locale.ROOT).endsWith(".csv")) {
+			throw new ValidationException("Only CSV files are allowed");
+		}
+
+		Path path = Paths.get(importProductsPath).toAbsolutePath().normalize();
+		try {
+			Path parent = path.getParent();
+			if (parent != null) {
+				Files.createDirectories(parent);
+			}
+			try (InputStream inputStream = file.getInputStream()) {
+				Files.copy(inputStream, path, StandardCopyOption.REPLACE_EXISTING);
+			}
+		} catch (IOException ex) {
+			throw new BusinessException("Unable to store import file", HttpStatus.INTERNAL_SERVER_ERROR);
+		}
+
+		BatchJobResponse response = importProductData(path);
 		appendLog(response);
 		return response;
 	}
@@ -159,16 +194,18 @@ public class BatchServiceImpl implements BatchService {
 	}
 
 	private void runScheduledJob(String jobType) {
-		BatchJobResponse response = executeJob(jobType);
+		BatchJobResponse response = executeJob(jobType, null);
 		appendLog(response);
 	}
 
-	private BatchJobResponse executeJob(String jobType) {
+	private BatchJobResponse executeJob(String jobType, BatchJobRequest request) {
 		try {
 			return switch (jobType) {
 				case "IMPORT_PRODUCT_DATA" -> importProductData();
-				case "GENERATE_DAILY_REPORTS" -> generateDailyReports();
-				case "AGGREGATE_SALES_DATA" -> aggregateSalesData();
+				case "GENERATE_DAILY_REPORTS" -> generateDailyReports(
+						request == null ? null : request.getReportDate());
+				case "AGGREGATE_SALES_DATA" -> aggregateSalesData(
+						request == null ? null : request.getReportDate());
 				default -> throw new ValidationException("Unsupported job type");
 			};
 		} catch (RuntimeException ex) {
@@ -178,6 +215,10 @@ public class BatchServiceImpl implements BatchService {
 
 	private BatchJobResponse importProductData() {
 		Path path = Paths.get(importProductsPath).toAbsolutePath().normalize();
+		return importProductData(path);
+	}
+
+	private BatchJobResponse importProductData(Path path) {
 		if (!Files.exists(path)) {
 			return batchMapper.toResponse("IMPORT_PRODUCT_DATA", "FAILED",
 					"Import file not found: " + path);
@@ -240,23 +281,32 @@ public class BatchServiceImpl implements BatchService {
 		throw new ValidationException("Missing required CSV column: " + keys[0]);
 	}
 
-	private BatchJobResponse generateDailyReports() {
-		LocalDate targetDate = LocalDate.now().minusDays(1);
+	private BatchJobResponse generateDailyReports(LocalDate reportDate) {
+		LocalDate targetDate = reportDate == null ? LocalDate.now().minusDays(1) : reportDate;
 		try {
-			reportService.generateSalesReport(targetDate, targetDate, "PDF");
-			reportService.generateSalesReport(targetDate, targetDate, "EXCEL");
-			reportService.generateInventoryReport(targetDate, targetDate, "PDF");
-			reportService.generateInventoryReport(targetDate, targetDate, "EXCEL");
-		} catch (RuntimeException ex) {
-			return batchMapper.toResponse("GENERATE_DAILY_REPORTS", "FAILED", ex.getMessage());
-		}
+			ReportResponse salesPdf = reportService.generateSalesReport(targetDate, targetDate, "PDF");
+			ReportResponse salesExcel = reportService.generateSalesReport(targetDate, targetDate, "EXCEL");
+			ReportResponse inventoryPdf = reportService.generateInventoryReport(targetDate, targetDate, "PDF");
+			ReportResponse inventoryExcel = reportService.generateInventoryReport(targetDate, targetDate, "EXCEL");
+			List<ReportResponse> reports = List.of(salesPdf, salesExcel, inventoryPdf, inventoryExcel);
 
-		return batchMapper.toResponse("GENERATE_DAILY_REPORTS", "COMPLETED",
-				"Daily reports generated for " + targetDate);
+			return BatchJobResponse.builder()
+					.jobType("GENERATE_DAILY_REPORTS")
+					.status("COMPLETED")
+					.message("Reports generated for " + targetDate)
+					.reports(reports)
+					.build();
+		} catch (RuntimeException ex) {
+			return BatchJobResponse.builder()
+					.jobType("GENERATE_DAILY_REPORTS")
+					.status("FAILED")
+					.message(ex.getMessage())
+					.build();
+		}
 	}
 
-	private BatchJobResponse aggregateSalesData() {
-		LocalDate targetDate = LocalDate.now().minusDays(1);
+	private BatchJobResponse aggregateSalesData(LocalDate reportDate) {
+		LocalDate targetDate = reportDate == null ? LocalDate.now().minusDays(1) : reportDate;
 		LocalDateTime start = targetDate.atStartOfDay();
 		LocalDateTime end = targetDate.atTime(23, 59, 59);
 		List<CustomerOrder> orders = customerOrderRepository.findByCreatedAtBetween(start, end).stream()
@@ -279,9 +329,18 @@ public class BatchServiceImpl implements BatchService {
 		aggregate.setOrderCount(orders.size());
 		aggregate.setTotalRevenue(totalRevenue);
 		salesAggregateRepository.save(aggregate);
+		SalesSummaryResponse summary = SalesSummaryResponse.builder()
+				.reportDate(targetDate)
+				.orderCount(orders.size())
+				.totalRevenue(totalRevenue)
+				.build();
 
-		return batchMapper.toResponse("AGGREGATE_SALES_DATA", "COMPLETED",
-				"Aggregated " + orders.size() + " orders for " + targetDate);
+		return BatchJobResponse.builder()
+				.jobType("AGGREGATE_SALES_DATA")
+				.status("COMPLETED")
+				.message("Aggregated " + orders.size() + " orders for " + targetDate)
+				.summary(summary)
+				.build();
 	}
 
 	private String normalizeJobType(String jobType) {

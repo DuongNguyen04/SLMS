@@ -1,6 +1,7 @@
 package com.example.slms.dto.response;
 
-import java.util.List;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -13,11 +14,9 @@ import lombok.Setter;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class BatchJobResponse {
+public class SalesSummaryResponse {
 
-    private String jobType;
-    private String status;
-    private String message;
-    private List<ReportResponse> reports;
-    private SalesSummaryResponse summary;
+    private LocalDate reportDate;
+    private Integer orderCount;
+    private BigDecimal totalRevenue;
 }

@@ -35,6 +35,9 @@ build/
 ### Local env ###
 .env
 
+### File storage (reports/imports) ###
+storage/
+
 ### Local Spring config ###
 src/main/resources/application-local.properties
 
